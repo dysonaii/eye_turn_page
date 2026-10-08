@@ -75,7 +75,7 @@ class PageTurnService : AccessibilityService() {
             previewAlpha = p.getInt(KEY_PVALPHA, 100).coerceIn(10, 100)
             idleMs = p.getInt(KEY_IDLE, 5).coerceIn(1, 30) * 60 * 1000L
             needClosed = p.getInt(KEY_NEED, 4).coerceIn(3, 8)
-            blinkScore = p.getInt(KEY_BLINK, 50).coerceIn(30, 70)
+            blinkScore = p.getInt(KEY_BLINK, 50).coerceIn(10, 70)
         }
 
         fun saveRunning(ctx: Context) {
@@ -204,48 +204,26 @@ class PageTurnService : AccessibilityService() {
     }
     private var previewPending = false
 
-    // ponytail: 蓋在 TextureView 上的透明層，只畫目標手勢的圈；不吃觸控（小窗照樣拖）
+    // ponytail: 蓋在 TextureView 上的透明層，只顯示左上三行狀態字；不吃觸控（小窗照樣拖）
     private inner class HandOverlay(ctx: Context) : View(ctx) {
-        var hg = 0; var hx = 0.5f; var hy = 0.5f
-        var tipText = "" // ponytail: 診斷小字，讀書姿勢出問題時一眼分出臉出鏡/計數中/冷卻
-        var rotDeg = 0 // 偵測圖轉了幾度（跟 EyeTracker.sensorToDisplay 同源）
-        var totalDeg = 0 // 預覽轉了幾度（跟 fitPreview 的 total 同源）
-        private val red = Paint().apply {
-            color = Color.RED; style = Paint.Style.STROKE
-            strokeWidth = dp(4).toFloat(); isAntiAlias = true
-        }
-        private val yellow = Paint().apply {
-            color = Color.YELLOW; style = Paint.Style.STROKE
-            strokeWidth = dp(4).toFloat(); isAntiAlias = true
-        }
+        var line1 = ""; var line2 = ""; var line3 = ""
         private val green = Paint().apply {
-            color = Color.GREEN; style = Paint.Style.STROKE
-            strokeWidth = dp(4).toFloat(); isAntiAlias = true
+            color = Color.GREEN; textSize = dp(12).toFloat(); isAntiAlias = true
+            textAlign = Paint.Align.LEFT
         }
-        private val txt = Paint().apply {
+        private val red = Paint().apply {
             color = Color.RED; textSize = dp(12).toFloat(); isAntiAlias = true
-            textAlign = Paint.Align.CENTER
+            textAlign = Paint.Align.LEFT
         }
-        fun setHand(g: Int, cx: Float, cy: Float) { hg = g; hx = cx; hy = cy; invalidate() }
-        fun setTip(s: String) { tipText = s; invalidate() }
-        // ponytail: 偵測圖與預覽轉向不同（差 sensor 一整圈），座標要轉回同一系再套 HAL 鏡像；
-        // 轉幾度全從 sensor/display 現算，不寫死，橫豎通用
-        private fun rot(x: Float, y: Float, deg: Int): Pair<Float, Float> = when (((deg % 360) + 360) % 360) {
-            90 -> Pair(1 - y, x); 180 -> Pair(1 - x, 1 - y); 270 -> Pair(y, 1 - x); else -> Pair(x, y)
-        }
+        // ponytail: 入鏡/閉眼/X 綠，其餘（出鏡/睜眼/拳）紅
+        private fun paintFor(s: String) = if (s == "入鏡" || s == "閉眼" || s == "X") green else red
+        fun setLines(a: String, b: String, c: String) { line1 = a; line2 = b; line3 = c; invalidate() }
         override fun onDraw(c: android.graphics.Canvas) {
             super.onDraw(c)
-            if (hg == 1 || hg == 2 || hg == 3) {
-                val ring = when (hg) { 1 -> red; 2 -> yellow; else -> green } // 眨眼紅下頁，眨眼+拳頭黃上頁，閉眼計數中綠
-                // ponytail: realme GT Neo2 實測對角反——偵測座標系差半圈，補 180；豎橫同式（兩路同 track disp）
-                val (xs, ys) = rot(hx, hy, 540 - rotDeg)
-                val (xu, yu) = rot(xs, ys, totalDeg)
-                val vx = (1 - xu) * width // HAL 自帶鏡像（豎屏已驗），App 不再翻
-                val vy = yu * height
-                val r = (minOf(width, height) * 0.22f).coerceAtLeast(dp(24).toFloat())
-                c.drawCircle(vx.coerceIn(r, (width - r).coerceAtLeast(r)), vy.coerceIn(r, (height - r).coerceAtLeast(r)), r, ring)
-            }
-            if (tipText.isNotEmpty()) c.drawText(tipText, width / 2f, dp(18).toFloat(), txt)
+            val x = dp(8).toFloat()
+            if (line1.isNotEmpty()) c.drawText(line1, x, dp(18).toFloat(), paintFor(line1))
+            if (line2.isNotEmpty()) c.drawText(line2, x, dp(34).toFloat(), paintFor(line2))
+            if (line3.isNotEmpty()) c.drawText(line3, x, dp(50).toFloat(), paintFor(line3))
         }
         init { isClickable = false; isFocusable = false }
     }
@@ -426,9 +404,8 @@ class PageTurnService : AccessibilityService() {
             this,
             onNext = { if (!flipBlocked()) tapNextPage() else false },
             onPrev = { if (!flipBlocked()) tapPrevPage() else false },
-            // ponytail: 三色圈蓋在臉上，比底部文字一眼看出；文字提示退回設定頁測試窗
-            onHand = { g, cx, cy -> try { previewOverlay?.setHand(g, cx, cy) } catch (_: Exception) {} },
-            onStatus = { s -> try { previewOverlay?.setTip(s) } catch (_: Exception) {} },
+            // ponytail: 左上三行狀態（出鏡/入鏡、閉眼/睜眼、拳/X），圈已拿掉
+            onLines = { a, b, c -> try { previewOverlay?.setLines(a, b, c) } catch (_: Exception) {} },
         ).also { tracker = it }
         t.cooldownMs = cooldownMs
         t.needClosed = needClosed
@@ -603,7 +580,6 @@ class PageTurnService : AccessibilityService() {
         val tv = android.view.TextureView(this).apply { alpha = previewAlpha / 100f }
         val overlay = HandOverlay(this)
         previewOverlay = overlay
-        refreshOverlayGeom()
         val box = android.widget.FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#CC000000"))
             addView(tv, android.widget.FrameLayout.LayoutParams(
@@ -697,15 +673,6 @@ class PageTurnService : AccessibilityService() {
         } catch (_: Exception) { previewBox = null; previewParams = null }
     }
 
-    /** 疊加層幾何跟轉向走：旋轉/開關變化時重算，圈才一直套在手上。 */
-    private fun refreshOverlayGeom() {
-        previewOverlay?.apply {
-            val disp = EyeTracker.displayDeg(this@PageTurnService)
-            rotDeg = (((EyeTracker.frontSensorDeg(this@PageTurnService) - disp) % 360) + 360) % 360
-            totalDeg = (360 - disp) % 360
-        }
-    }
-
     // ponytail: 直屏底橫條，橫屏左豎條；從起點長滿=冷卻走完
     private fun coolParams(): android.widget.FrameLayout.LayoutParams {
         val M = android.widget.FrameLayout.LayoutParams.MATCH_PARENT
@@ -734,7 +701,6 @@ class PageTurnService : AccessibilityService() {
             tv.alpha = previewAlpha / 100f
             tv.post { EyeTracker.fitPreview(tv, EyeTracker.frontSensorDeg(this), EyeTracker.displayDeg(this)) }
         }
-        refreshOverlayGeom()
         refreshCoolBarGeom()
     }
 

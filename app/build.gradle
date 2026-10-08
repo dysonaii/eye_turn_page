@@ -32,3 +32,28 @@ dependencies {
     // ponytail: 臉＋手關鍵點唯一外來依賴；Camera2 用內建，眨眼讀 blendshape、拳頭自寫幾何
     implementation 'com.google.mediapipe:tasks-vision:0.10.26.1'
 }
+
+// ponytail: *.task 不進 git（見 .gitignore），換 PC 必漏→執行期「缺模型」；
+// 缺啥 build 時自動抓官方檔，離線失敗不炸（沿用執行期 Toast 提示）
+def assetsDir = file("src/main/assets")
+def models = [
+    "face_landmarker.task": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+    "hand_landmarker.task" : "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+]
+tasks.register("downloadModels") {
+    doLast {
+        assetsDir.mkdirs()
+        models.each { name, url ->
+            def f = new File(assetsDir, name)
+            if (!f.exists()) {
+                try {
+                    println("Downloading $name ...")
+                    new URL(url).withInputStream { i -> f.withOutputStream { it << i } }
+                } catch (Exception e) {
+                    logger.warn("model $name 下載失敗（離線？）: ${e.message}，執行期會 Toast 提示")
+                }
+            }
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn("downloadModels") }

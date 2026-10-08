@@ -96,11 +96,11 @@ class MainActivity : Activity() {
         }
         blinkLabel = TextView(this)
         blinkSeek = SeekBar(this).apply {
-            max = 40 // 30~70%；default 50（越小越靈）
-            progress = (p.getInt(PageTurnService.KEY_BLINK, 50) - 30).coerceIn(0, 40)
+            max = 60 // 10~70%；default 50（越小越靈）
+            progress = (p.getInt(PageTurnService.KEY_BLINK, 50) - 10).coerceIn(0, 60)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
-                    blinkLabel.text = "閉眼靈敏度：${v + 30}%"
+                    blinkLabel.text = "閉眼靈敏度：${v + 10}%"
                     save()
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -226,7 +226,7 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(layout) })
         coolLabel.text = "翻頁冷卻：${coolSeek.progress + 1} 秒"
         needLabel.text = "閉眼時間：${needSeek.progress + 3} 幀"
-        blinkLabel.text = "閉眼靈敏度：${blinkSeek.progress + 30}%"
+        blinkLabel.text = "閉眼靈敏度：${blinkSeek.progress + 10}%"
         idleLabel.text = "閒置 ${idleSeek.progress + 1} 分鐘自動停"
         alphaLabel.text = "懸浮球透明度：${alphaSeek.progress + 10}%"
         pvSizeLabel.text = "預覽窗大小：${80 + pvSizeSeek.progress * 10}dp"

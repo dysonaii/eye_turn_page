@@ -27,8 +27,7 @@ class EyeTracker(
     private val onNext: () -> Boolean,
     private val onPrev: () -> Boolean,
     private val onStatus: (String) -> Unit = {},
-    // ponytail: 小窗圈色用——每幀推狀態＋臉中心概位；0=無臉不畫，1=眨眼紅圈下頁，2=眨眼+拳頭黃圈上頁，3=閉眼計數中綠圈
-    private val onHand: (Int, Float, Float) -> Unit = { _, _, _ -> },
+    private val onLines: (String, String, String) -> Unit = { _, _, _ -> },
 ) {
     companion object {
         const val MODEL_ASSET = "face_landmarker.task"
@@ -48,7 +47,8 @@ class EyeTracker(
             val mid = extended(12, 10) || straight(12, 10, 9)
             val ring = extended(16, 14) || straight(16, 14, 13)
             val pinky = extended(20, 18) || straight(20, 18, 17)
-            return !thumbWide && !idx && !mid && !ring && !pinky
+            // ponytail: 半握也算拳（伸開≤1指），拇指維持嚴格防誤觸
+            return !thumbWide && listOf(idx, mid, ring, pinky).count { it } <= 1
         }
 
         /** 眨眼邊緣邏輯自檢（無需相機/模型）：回傳每次觸發的幀 index。 */
@@ -120,7 +120,33 @@ class EyeTracker(
             // 觸發後閉著不連翻，睜眼後再閉才翻
             check(blinkFiresAt(List(12) { true }) == listOf(5)) { "同一次閉眼只翻一次" }
             check(blinkFiresAt(List(6) { true } + listOf(false) + List(6) { true }) == listOf(5, 12)) { "睜眼後再閉應再翻" }
+            // 拳：全握＋半握（伸開≤1指）算拳，兩指以上不算
+            check(isFist(fakeHand(emptySet()))) { "全握應算拳" }
+            check(isFist(fakeHand(setOf(0)))) { "半握應算拳" }
+            check(!isFist(fakeHand(setOf(0, 1)))) { "兩指伸不應算拳" }
+            check(!isFist(fakeHand(setOf(0, 1, 2, 3)))) { "全張不應算拳" }
             return "EyeTracker demo OK"
+        }
+
+        // ponytail: 合成手驗 isFist，不需相機/模型；0=食..3=尾，open 指伸開的手指
+        fun fakeHand(open: Set<Int>): List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark> {
+            val mcpX = listOf(0.38f, 0.46f, 0.54f, 0.62f)
+            val pts = Array(21) { floatArrayOf(0.5f, 0.5f) }
+            pts[0] = floatArrayOf(0.5f, 0.9f)
+            pts[1] = floatArrayOf(0.42f, 0.8f); pts[2] = floatArrayOf(0.38f, 0.75f)
+            pts[3] = floatArrayOf(0.36f, 0.7f); pts[4] = floatArrayOf(0.4f, 0.66f)
+            for (f in 0..3) {
+                val x = mcpX[f]
+                val b = 5 + f * 4
+                if (f in open) {
+                    pts[b] = floatArrayOf(x, 0.7f); pts[b + 1] = floatArrayOf(x, 0.55f)
+                    pts[b + 2] = floatArrayOf(x, 0.4f); pts[b + 3] = floatArrayOf(x, 0.28f)
+                } else {
+                    pts[b] = floatArrayOf(x, 0.7f); pts[b + 1] = floatArrayOf(x, 0.64f)
+                    pts[b + 2] = floatArrayOf(x, 0.61f); pts[b + 3] = floatArrayOf(x + 0.005f, 0.62f)
+                }
+            }
+            return pts.map { com.google.mediapipe.tasks.components.containers.NormalizedLandmark.create(it[0], it[1], 0f) }
         }
     }
 
@@ -257,17 +283,13 @@ class EyeTracker(
             val fres = fm.detect(mpImg)
             val faces = fres.faceLandmarks()
             if (faces.isEmpty()) {
-                if (++faceLostStreak <= 2) return // 抖動容忍：凍住，不計不清，不刷提示
+                if (++faceLostStreak <= 5) return // 瞇眼會短暫跟丟：凍住，不計不清，不刷提示
                 closedStreak = 0; openStreak = 0
                 statusThrottled("臉出鏡")
-                eye(0, 0f, 0f)
+                lines("出鏡", "睜眼", "X")
                 return
             }
             faceLostStreak = 0
-            // ponytail: 臉中心=全部關鍵點平均，夠畫圈用
-            var sx = 0f; var sy = 0f
-            for (p in faces[0]) { sx += p.x(); sy += p.y() }
-            val cx = sx / faces[0].size; val cy = sy / faces[0].size
             var blink = 0f
             try {
                 // ponytail: 這版 faceBlendshapes() 包 Optional，先 isPresent 再 get
@@ -278,7 +300,9 @@ class EyeTracker(
                     }
                 }
             } catch (_: Exception) {}
-            if (blink < blinkScore - 0.1f) {
+            // ponytail: 抖動帶跟門檻等比（50% 時=0.1 跟舊版一致）；固定 0.1 在 10% 門檻下會永遠不清零不上膛
+            val hys = (blinkScore * 0.3f).coerceAtMost(0.1f)
+            if (blink < blinkScore - hys) {
                 // 睜眼：連 2 幀才算數，單幀抖動不清零；達標掛起的在睜眼這一下才翻
                 val dir = pendingDir
                 val wasClosed = closedStreak > 0 || !armed || dir != 0
@@ -297,30 +321,31 @@ class EyeTracker(
                     status(if (lastFiredDir == 2) "上一頁" else "下一頁")
                     lastFiredDir = 0
                 } else statusThrottled("")
-                eye(if (isFistNow(mpImg)) 3 else 0, cx, cy) // 拳頭先舉著待命也給綠圈看得到
+                val fistOpen = isFistNow(mpImg) // 拳頭先舉著待命也看得到
+                lines("入鏡", "睜眼", if (fistOpen) "拳" else "X")
                 return
             }
             openStreak = 0
-            if (!armed) { // 觸發後還閉著：不連翻（含分數掉進抖動帶，紅圈不斷）
+            if (!armed) { // 觸發後還閉著：不連翻
                 statusThrottled("閉眼")
-                eye(1, cx, cy)
+                lines("入鏡", "閉眼", lastFist)
                 return
             }
             if (blink < blinkScore) {
                 // 抖動帶：凍住，既不計也不清
                 statusThrottled(if (closedStreak > 0) "閉眼" else "")
-                eye(if (closedStreak > 0) 3 else if (isFistNow(mpImg)) 3 else 0, cx, cy)
+                if (closedStreak > 0) lines("入鏡", "閉眼", lastFist)
+                else { val fj = isFistNow(mpImg); lines("入鏡", "睜眼", if (fj) "拳" else "X") }
                 return
             }
             closedStreak++
             val fist = isFistNow(mpImg)
-            eye(if (fist) 2 else 3, cx, cy)
+            lines("入鏡", "閉眼", if (fist) "拳" else "X")
             statusThrottled("閉眼")
             if (closedStreak >= needClosed) {
                 // 達標先掛起，不在這裡翻；等睜眼那一下才翻（閉->開模型，提示和動作永遠對得上）
                 closedStreak = 0; armed = false
                 pendingDir = if (fist) 2 else 1
-                eye(if (fist) 2 else 1, cx, cy)
             }
         } catch (_: Exception) {
         } finally { busy = false }
@@ -336,9 +361,14 @@ class EyeTracker(
 
     private fun status(s: String) { main.post { try { onStatus(s) } catch (_: Exception) {} } }
 
-    private fun eye(g: Int, cx: Float, cy: Float) { main.post { try { onHand(g, cx, cy) } catch (_: Exception) {} } }
+    private var lastFist = "X" // 最新一幀拳頭狀態；閉著不動時沿用，不重跑手模型
+    private fun lines(face: String, eye: String, fist: String) {
+        lastFist = fist
+        main.post { try { onLines(face, eye, fist) } catch (_: Exception) {} }
+    }
 
     private fun statusThrottled(s: String) {
+        if (s.isEmpty()) return // ponytail: 提示 sticky，顯示後不自動清掉
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastStatusAt < 800) return
         lastStatusAt = now; status(s)
