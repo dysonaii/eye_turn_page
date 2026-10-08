@@ -1,0 +1,16 @@
+# Gradle / Android Studio
+.gradle/
+app/build/
+build/
+local.properties
+*.iml
+.idea/
+# signing
+*.jks
+*.keystore
+# models (8MB+ 下載放 assets，不進 git)
+*.task
+# OS
+Thumbs.db
+.DS_Store
+.kotlin/
