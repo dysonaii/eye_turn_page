@@ -310,8 +310,8 @@ class MainActivity : Activity() {
         if (!testing || testTracker != null) { ps?.release(); return }
         val nt = EyeTracker(
             this,
-            onNext = { runOnUiThread { Toast.makeText(this, "會翻：下頁", Toast.LENGTH_SHORT).show() } },
-            onPrev = { runOnUiThread { Toast.makeText(this, "會翻：上頁", Toast.LENGTH_SHORT).show() } },
+            onNext = { runOnUiThread { Toast.makeText(this, "會翻：下頁", Toast.LENGTH_SHORT).show() }; true },
+            onPrev = { runOnUiThread { Toast.makeText(this, "會翻：上頁", Toast.LENGTH_SHORT).show() }; true },
             onStatus = { s -> runOnUiThread { gestureStatus.text = "眨眼：$s" } },
         )
         nt.cooldownMs = 1000L

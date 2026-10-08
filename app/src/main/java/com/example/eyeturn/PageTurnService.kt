@@ -223,7 +223,7 @@ class PageTurnService : AccessibilityService() {
             strokeWidth = dp(4).toFloat(); isAntiAlias = true
         }
         private val txt = Paint().apply {
-            color = Color.WHITE; textSize = dp(12).toFloat(); isAntiAlias = true
+            color = Color.RED; textSize = dp(12).toFloat(); isAntiAlias = true
             textAlign = Paint.Align.CENTER
         }
         fun setHand(g: Int, cx: Float, cy: Float) { hg = g; hx = cx; hy = cy; invalidate() }
@@ -424,8 +424,8 @@ class PageTurnService : AccessibilityService() {
         if (tracker?.running == true) return
         val t = tracker ?: EyeTracker(
             this,
-            onNext = { if (!flipBlocked()) tapNextPage() },
-            onPrev = { if (!flipBlocked()) tapPrevPage() },
+            onNext = { if (!flipBlocked()) tapNextPage() else false },
+            onPrev = { if (!flipBlocked()) tapPrevPage() else false },
             // ponytail: 三色圈蓋在臉上，比底部文字一眼看出；文字提示退回設定頁測試窗
             onHand = { g, cx, cy -> try { previewOverlay?.setHand(g, cx, cy) } catch (_: Exception) {} },
             onStatus = { s -> try { previewOverlay?.setTip(s) } catch (_: Exception) {} },
@@ -451,7 +451,7 @@ class PageTurnService : AccessibilityService() {
     }
 
     // ---- gestures out ----
-    private fun tapAt(fracX: Float) {
+    private fun tapAt(fracX: Float): Boolean {
         val (w, h) = screenSize()
         val x = w * fracX
         val y = h * 0.5f
@@ -462,17 +462,18 @@ class PageTurnService : AccessibilityService() {
             .build()
         val ok = dispatchGesture(gesture, null, null)
         if (!ok) stop()
+        return ok
     }
 
-    private fun tapNextPage() {
-        lastFlipAt = SystemClock.uptimeMillis()
-        coolStartAt = lastFlipAt
-        tapAt(0.8f) // 右中=下頁
+    private fun tapNextPage(): Boolean {
+        val ok = tapAt(0.8f) // 右中=下頁
+        if (ok) { lastFlipAt = SystemClock.uptimeMillis(); coolStartAt = lastFlipAt }
+        return ok
     }
-    private fun tapPrevPage() {
-        lastFlipAt = SystemClock.uptimeMillis()
-        coolStartAt = lastFlipAt
-        tapAt(0.2f) // 左中=上頁
+    private fun tapPrevPage(): Boolean {
+        val ok = tapAt(0.2f) // 左中=上頁
+        if (ok) { lastFlipAt = SystemClock.uptimeMillis(); coolStartAt = lastFlipAt }
+        return ok
     }
 
     // ---- 懸浮球 ----

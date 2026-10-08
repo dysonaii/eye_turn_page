@@ -21,11 +21,11 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker.HandLandmarkerOptions
 import kotlin.math.hypot
 
-/** 眨眼翻頁：閉眼維持約0.6秒=下頁，同幀有拳頭=上頁。Camera2 前鏡頭 + Face blendshape + Hand 幾何。 */
+/** 眨眼翻頁：閉眼達標再睜眼=下頁，同段有拳頭=上頁。Camera2 前鏡頭 + Face blendshape + Hand 幾何。 */
 class EyeTracker(
     private val ctx: Context,
-    private val onNext: () -> Unit,
-    private val onPrev: () -> Unit,
+    private val onNext: () -> Boolean,
+    private val onPrev: () -> Boolean,
     private val onStatus: (String) -> Unit = {},
     // ponytail: 小窗圈色用——每幀推狀態＋臉中心概位；0=無臉不畫，1=眨眼紅圈下頁，2=眨眼+拳頭黃圈上頁，3=閉眼計數中綠圈
     private val onHand: (Int, Float, Float) -> Unit = { _, _, _ -> },
@@ -136,6 +136,9 @@ class EyeTracker(
     private var busy = false
     private var closedStreak = 0
     private var openStreak = 0 // 連 2 幀睜眼才算睜，單幀抖動不清零
+    private var faceLostStreak = 0 // 跟丟 2 幀內凍住，不清零（閉用力頭晃也會抖）
+    @Volatile private var lastFiredDir = 0 // 0=沒翻，1=下頁，2=上頁；顯示後清零
+    @Volatile private var pendingDir = 0 // 閉眼達標掛起的方向；睜眼那一下才翻
     private var armed = true // 睜眼才重上膛；觸發後閉著不連翻
     private var lastFireAt = 0L
     private var lastStatusAt = 0L
@@ -226,7 +229,7 @@ class EyeTracker(
         try { reader?.close() } catch (_: Exception) {}
         thread?.quitSafely()
         session = null; cam = null; reader = null; thread = null; bg = null
-        busy = false; closedStreak = 0; openStreak = 0; armed = true
+        busy = false; closedStreak = 0; openStreak = 0; faceLostStreak = 0; armed = true; lastFiredDir = 0; pendingDir = 0
     }
 
     fun close() {
@@ -254,11 +257,13 @@ class EyeTracker(
             val fres = fm.detect(mpImg)
             val faces = fres.faceLandmarks()
             if (faces.isEmpty()) {
+                if (++faceLostStreak <= 2) return // 抖動容忍：凍住，不計不清，不刷提示
                 closedStreak = 0; openStreak = 0
                 statusThrottled("臉出鏡")
                 eye(0, 0f, 0f)
                 return
             }
+            faceLostStreak = 0
             // ponytail: 臉中心=全部關鍵點平均，夠畫圈用
             var sx = 0f; var sy = 0f
             for (p in faces[0]) { sx += p.x(); sy += p.y() }
@@ -274,13 +279,25 @@ class EyeTracker(
                 }
             } catch (_: Exception) {}
             if (blink < blinkScore - 0.1f) {
-                // 睜眼：連 2 幀才算數，單幀抖動不清零
-                val wasClosed = closedStreak > 0 || !armed
+                // 睜眼：連 2 幀才算數，單幀抖動不清零；達標掛起的在睜眼這一下才翻
+                val dir = pendingDir
+                val wasClosed = closedStreak > 0 || !armed || dir != 0
                 if (++openStreak >= 2) { closedStreak = 0; armed = true }
-                val fistOpen = isFistNow(mpImg)
-                if (wasClosed) statusThrottled(if (fistOpen) "上一頁" else "下一頁")
-                else statusThrottled("")
-                eye(if (fistOpen) 3 else 0, cx, cy) // 拳頭先舉著待命也給綠圈看得到
+                if (dir != 0) {
+                    pendingDir = 0
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - lastFireAt < cooldownMs) {
+                        status(if (dir == 2) "開眼上" else "開眼下") // 冷卻吞掉：只顯示過渡
+                    } else {
+                        lastFireAt = now
+                        status(if (dir == 2) "開眼上" else "開眼下")
+                        main.post { lastFiredDir = if (dir == 2) { if (onPrev()) 2 else 0 } else { if (onNext()) 1 else 0 } }
+                    }
+                } else if (lastFiredDir != 0) {
+                    status(if (lastFiredDir == 2) "上一頁" else "下一頁")
+                    lastFiredDir = 0
+                } else statusThrottled("")
+                eye(if (isFistNow(mpImg)) 3 else 0, cx, cy) // 拳頭先舉著待命也給綠圈看得到
                 return
             }
             openStreak = 0
@@ -300,13 +317,10 @@ class EyeTracker(
             eye(if (fist) 2 else 3, cx, cy)
             statusThrottled("閉眼")
             if (closedStreak >= needClosed) {
-                val now = android.os.SystemClock.uptimeMillis()
+                // 達標先掛起，不在這裡翻；等睜眼那一下才翻（閉->開模型，提示和動作永遠對得上）
                 closedStreak = 0; armed = false
-                val f = fist
-                eye(if (f) 2 else 1, cx, cy) // ponytail: 冷卻內也要亮紅/黃，否則綠卡住像沒抓到
-                if (now - lastFireAt < cooldownMs) return
-                lastFireAt = now
-                main.post { if (f) onPrev() else onNext() }
+                pendingDir = if (fist) 2 else 1
+                eye(if (fist) 2 else 1, cx, cy)
             }
         } catch (_: Exception) {
         } finally { busy = false }
