@@ -29,6 +29,7 @@ class MainActivity : Activity() {
     private lateinit var needSeek: SeekBar
     private lateinit var blinkLabel: TextView
     private lateinit var blinkSeek: SeekBar
+    private lateinit var squintBox: CheckBox
     private lateinit var idleLabel: TextView
     private lateinit var idleSeek: SeekBar
     private lateinit var overlayBox: CheckBox
@@ -58,7 +59,7 @@ class MainActivity : Activity() {
         coolLabel = TextView(this)
         coolSeek = SeekBar(this).apply {
             max = 29 // 1~30s
-            progress = (p.getInt(PageTurnService.KEY_COOLDOWN, 3000) / 1000 - 1).coerceIn(0, 29)
+            progress = (p.getInt(PageTurnService.KEY_COOLDOWN, 5000) / 1000 - 1).coerceIn(0, 29)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
                     coolLabel.text = "翻頁冷卻：${v + 1} 秒"
@@ -96,8 +97,8 @@ class MainActivity : Activity() {
         }
         blinkLabel = TextView(this)
         blinkSeek = SeekBar(this).apply {
-            max = 60 // 10~70%；default 50（越小越靈）
-            progress = (p.getInt(PageTurnService.KEY_BLINK, 50) - 10).coerceIn(0, 60)
+            max = 60 // 10~70%；default 40（越小越靈）
+            progress = (p.getInt(PageTurnService.KEY_BLINK, 40) - 10).coerceIn(0, 60)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
                     blinkLabel.text = "閉眼靈敏度：${v + 10}%"
@@ -106,6 +107,11 @@ class MainActivity : Activity() {
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
+        }
+        squintBox = CheckBox(this).apply {
+            text = "瞇眼（合上3/4）也算閉眼"
+            isChecked = p.getBoolean(PageTurnService.KEY_SQUINT, false)
+            setOnCheckedChangeListener { _, _ -> save() }
         }
         overlayBox = CheckBox(this).apply {
             text = "懸浮球：點一下開始/暫停，長按回設定"
@@ -198,13 +204,13 @@ class MainActivity : Activity() {
             addView(accessBtn)
             addView(overlayBtn)
             addView(cameraBtn)
-            addView(TextView(context).apply { text = "閉眼=下頁，閉眼+拳頭=上頁" })
             addView(coolLabel)
             addView(coolSeek)
             addView(needLabel)
             addView(needSeek)
             addView(blinkLabel)
             addView(blinkSeek)
+            addView(squintBox)
             addView(idleLabel)
             addView(idleSeek)
             addView(overlayBox)
@@ -260,7 +266,8 @@ class MainActivity : Activity() {
         prefs().edit()
             .putInt(PageTurnService.KEY_COOLDOWN, (coolSeek.progress + 1) * 1000)
             .putInt(PageTurnService.KEY_NEED, needSeek.progress + 3)
-            .putInt(PageTurnService.KEY_BLINK, blinkSeek.progress + 30)
+            .putInt(PageTurnService.KEY_BLINK, blinkSeek.progress + 10)
+            .putBoolean(PageTurnService.KEY_SQUINT, squintBox.isChecked)
             .putInt(PageTurnService.KEY_IDLE, idleSeek.progress + 1)
             .putBoolean(PageTurnService.KEY_OVERLAY, overlayBox.isChecked)
             .putInt(PageTurnService.KEY_ALPHA, alphaSeek.progress + 10)
@@ -317,6 +324,7 @@ class MainActivity : Activity() {
         nt.cooldownMs = 1000L
         nt.needClosed = PageTurnService.needClosed
         nt.blinkScore = PageTurnService.blinkScore / 100f
+        nt.squintMode = PageTurnService.squintMode
         if (!nt.start(ps)) { ps?.release(); stopTest(); return } // 失敗原因已由 onStatus 顯示
         previewSurface = ps
         testTracker = nt

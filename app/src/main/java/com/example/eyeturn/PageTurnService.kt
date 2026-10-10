@@ -41,12 +41,13 @@ class PageTurnService : AccessibilityService() {
         const val KEY_IDLE = "idle"
         const val KEY_NEED = "need"
         const val KEY_BLINK = "blink"
+        const val KEY_SQUINT = "squint"
         val DEFAULT_APPS = setOf("com.tencent.weread")
 
         // ponytail: static 當跨 Activity/Service 通訊，存 DB / Intent 是多餘的
         @Volatile var serviceOn = false
         @Volatile var running = false
-        @Volatile var cooldownMs = 1500L
+        @Volatile var cooldownMs = 5000L
         @Volatile var overlayOn = true
         @Volatile var allowedApps: Set<String> = DEFAULT_APPS
         @Volatile var ballAlpha = 50
@@ -57,7 +58,8 @@ class PageTurnService : AccessibilityService() {
         @Volatile var previewAlpha = 100
         @Volatile var idleMs = 5 * 60 * 1000L // 閒置多久沒翻頁自動停；default 5 分鐘
         @Volatile var needClosed = 4 // 閉眼幾幀才翻；default 4（~0.4秒，比 6 靈）
-        @Volatile var blinkScore = 50 // eyeBlink 百分比，超過算閉；越小越靈
+        @Volatile var blinkScore = 40 // eyeBlink 百分比，超過算閉；越小越靈
+        @Volatile var squintMode = false // 瞇眼（3/4）也算閉；default 關
         @Volatile var currentPkg: String = ""
         @Volatile var instance: PageTurnService? = null
 
@@ -65,7 +67,7 @@ class PageTurnService : AccessibilityService() {
             val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             serviceOn = p.getBoolean(KEY_SERVICE, false)
             running = p.getBoolean(KEY_RUNNING, false)
-            cooldownMs = p.getInt(KEY_COOLDOWN, 3000).coerceIn(1000, 30000).toLong()
+            cooldownMs = p.getInt(KEY_COOLDOWN, 5000).coerceIn(1000, 30000).toLong()
             overlayOn = p.getBoolean(KEY_OVERLAY, true)
             allowedApps = p.getStringSet(KEY_APPS, DEFAULT_APPS) ?: DEFAULT_APPS
             ballAlpha = p.getInt(KEY_ALPHA, 50).coerceIn(10, 100)
@@ -75,7 +77,8 @@ class PageTurnService : AccessibilityService() {
             previewAlpha = p.getInt(KEY_PVALPHA, 100).coerceIn(10, 100)
             idleMs = p.getInt(KEY_IDLE, 5).coerceIn(1, 30) * 60 * 1000L
             needClosed = p.getInt(KEY_NEED, 4).coerceIn(3, 8)
-            blinkScore = p.getInt(KEY_BLINK, 50).coerceIn(10, 70)
+            blinkScore = p.getInt(KEY_BLINK, 40).coerceIn(10, 70)
+            squintMode = p.getBoolean(KEY_SQUINT, false)
         }
 
         fun saveRunning(ctx: Context) {
@@ -281,8 +284,9 @@ class PageTurnService : AccessibilityService() {
             val maxW = (sw / 2).coerceAtLeast(dp(80))
             pp.width = pp.width.coerceIn(dp(80), maxW)
             pp.height = pp.width * 3 / 4
-            // ponytail: 轉向切到該向記住的位置；沒擺過就留在原地夾回可視範圍
-            val (sx, sy) = savedPos()
+            // ponytail: 用 newConfig 方向讀槽——回調時 resources 還是舊向，直屏會誤讀橫屏槽
+            val landNow = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
+            val (sx, sy) = if (landNow) pvXL to pvYL else pvXP to pvYP
             pp.x = (if (sx >= 0) sx else pp.x).coerceIn(0, (sw - pp.width).coerceAtLeast(0))
             pp.y = (if (sy >= 0) sy else pp.y).coerceIn(0, (sh - pp.height).coerceAtLeast(0))
             if (previewBox != null) try { wm?.updateViewLayout(previewBox, pp) } catch (_: Exception) {}
@@ -324,6 +328,7 @@ class PageTurnService : AccessibilityService() {
         tracker?.cooldownMs = cooldownMs
         tracker?.needClosed = needClosed
         tracker?.blinkScore = blinkScore / 100f
+        tracker?.squintMode = squintMode
         if (!overlayOn) hideOverlay()
         else showOverlay()
         refitPreview() // 大小/透明度即時生效
@@ -410,6 +415,7 @@ class PageTurnService : AccessibilityService() {
         t.cooldownMs = cooldownMs
         t.needClosed = needClosed
         t.blinkScore = blinkScore / 100f
+        t.squintMode = squintMode
         if (!t.start(ps)) {
             // 相機開不了（權限/模型）：停本次免得空轉，回設定頁看提示
             Toast.makeText(this, "相機/模型沒就緒，去設定頁檢查", Toast.LENGTH_SHORT).show()
@@ -649,15 +655,15 @@ class PageTurnService : AccessibilityService() {
                     tv.post { EyeTracker.fitPreview(tv, EyeTracker.frontSensorDeg(this), EyeTracker.displayDeg(this)) }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val e = getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    val ed = getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                     if (resizing) {
                         previewWdp = (pp.width / resources.displayMetrics.density).toInt().coerceIn(80, 400)
-                        e.putInt(KEY_PVW, previewWdp)
+                        ed.putInt(KEY_PVW, previewWdp)
                     }
                     // ponytail: 抬手即存位置（直橫分槽），服務被殺也不丟
-                    if (isLandscape()) { pvXL = pp.x; pvYL = pp.y; e.putInt(KEY_PVX_L, pp.x).putInt(KEY_PVY_L, pp.y) }
-                    else { pvXP = pp.x; pvYP = pp.y; e.putInt(KEY_PVX_P, pp.x).putInt(KEY_PVY_P, pp.y) }
-                    e.apply()
+                    if (isLandscape()) { pvXL = pp.x; pvYL = pp.y; ed.putInt(KEY_PVX_L, pp.x).putInt(KEY_PVY_L, pp.y) }
+                    else { pvXP = pp.x; pvYP = pp.y; ed.putInt(KEY_PVX_P, pp.x).putInt(KEY_PVY_P, pp.y) }
+                    ed.apply()
                     resizing = false
                 }
             }

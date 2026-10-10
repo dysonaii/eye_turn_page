@@ -36,6 +36,23 @@ class EyeTracker(
         const val H = 360
         private const val FRAME_GAP_MS = 100L // ~10fps，省電且夠用
         private const val NEED_CLOSED = 6 // demo 預設；實跑用 needClosed（設定頁可調）
+        const val FACE_LOST_TOL = 30 // ~3s：大小臉/抬低頭/閉眼跟丟全凍住，幾乎不判出鏡
+        const val EAR_CLOSED = 0.15f // 全閉門檻
+        const val EAR_SQUINT = 0.17f // 瞇眼（3/4）門檻
+        const val EAR_HYS = 0.02f
+        // ponytail: EAR 雙眼平均，landmark 不夠回 1（當睜眼，不誤觸）
+        fun eyeEar(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Float {
+            return try {
+                if (lm.size < 400) return 1f
+                fun d(a: Int, b: Int) = hypot((lm[a].x() - lm[b].x()).toDouble(), (lm[a].y() - lm[b].y()).toDouble())
+                val lh = d(33, 133)
+                val rh = d(362, 263)
+                if (lh < 1e-6 || rh < 1e-6) return 1f
+                val lear = (d(159, 145) + d(158, 153)) / (2 * lh)
+                val rear = (d(386, 374) + d(387, 373)) / (2 * rh)
+                ((lear + rear) / 2).toFloat()
+            } catch (_: Exception) { 1f }
+        }
         // ponytail: 只認拳頭，其餘手勢當沒看到；鏡像不影響伸/屈判斷
         fun isFist(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Boolean {
             fun dist(a: Int, b: Int) = hypot((lm[a].x() - lm[b].x()).toDouble(), (lm[a].y() - lm[b].y()).toDouble())
@@ -125,7 +142,29 @@ class EyeTracker(
             check(isFist(fakeHand(setOf(0)))) { "半握應算拳" }
             check(!isFist(fakeHand(setOf(0, 1)))) { "兩指伸不應算拳" }
             check(!isFist(fakeHand(setOf(0, 1, 2, 3)))) { "全張不應算拳" }
+            // EAR：睜>瞇>閉，全閉與瞇眼都要能分辨
+            check(eyeEar(fakeFace(0.30f)) > 0.25f) { "睜眼 EAR 應大" }
+            check(eyeEar(fakeFace(0.16f)) < EAR_SQUINT) { "瞇眼應進瞇眼門檻" }
+            check(eyeEar(fakeFace(0.08f)) < EAR_CLOSED) { "全閉應進全閉門檻" }
+            check(eyeEar(fakeFace(0.16f)) > EAR_CLOSED) { "瞇眼不應掉進全閉門檻" }
             return "EyeTracker demo OK"
+        }
+
+        // ponytail: 合成臉驗 EAR；h=0.06，v=ear*h，EAR 反推回 ear
+        fun fakeFace(ear: Float): List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark> {
+            val pts = Array(478) { floatArrayOf(0.5f, 0.5f) }
+            fun set(i: Int, x: Float, y: Float) { if (i < 478) pts[i] = floatArrayOf(x, y) }
+            val h = 0.06f
+            val v = ear * h
+            // 左眼 33-133 水平，159-145、158-153 垂直
+            set(33, 0.30f, 0.40f); set(133, 0.30f + h, 0.40f)
+            set(159, 0.33f, 0.40f - v / 2); set(145, 0.33f, 0.40f + v / 2)
+            set(158, 0.34f, 0.40f - v / 2); set(153, 0.34f, 0.40f + v / 2)
+            // 右眼 362-263 水平，386-374、387-373 垂直
+            set(362, 0.64f, 0.40f); set(263, 0.64f + h, 0.40f)
+            set(386, 0.67f, 0.40f - v / 2); set(374, 0.67f, 0.40f + v / 2)
+            set(387, 0.68f, 0.40f - v / 2); set(373, 0.68f, 0.40f + v / 2)
+            return pts.map { com.google.mediapipe.tasks.components.containers.NormalizedLandmark.create(it[0], it[1], 0f) }
         }
 
         // ponytail: 合成手驗 isFist，不需相機/模型；0=食..3=尾，open 指伸開的手指
@@ -169,8 +208,9 @@ class EyeTracker(
     private var lastFireAt = 0L
     private var lastStatusAt = 0L
     @Volatile var cooldownMs = 1500L
-    @Volatile var needClosed = 6 // 閉眼幾幀才翻（~10fps，6≈0.6秒）；設定頁可調 3~8
-    @Volatile var blinkScore = 0.5f // eyeBlink 超過算閉；設定頁可調 0.3~0.7（越小越靈）
+    @Volatile var needClosed = 4 // 閉眼幾幀才翻（~10fps，4≈0.4秒）；設定頁可調 3~8
+    @Volatile var blinkScore = 0.4f // eyeBlink 超過算閉；設定頁可調 0.3~0.7（越小越靈）
+    @Volatile var squintMode = false // 瞇眼（3/4）也算閉；設定頁開關
     @Volatile var running = false
 
     /** model 缺失/權限不足回 false，呼叫方 Toast 提示，不炸。preview 有給才顯示小窗。 */
@@ -184,8 +224,8 @@ class EyeTracker(
                 val base = BaseOptions.builder().setModelAssetPath(MODEL_ASSET).setDelegate(Delegate.CPU).build()
                 val opt = FaceLandmarkerOptions.builder()
                     .setBaseOptions(base).setRunningMode(RunningMode.IMAGE)
-                    .setNumFaces(1).setMinFaceDetectionConfidence(0.5f)
-                    .setMinFacePresenceConfidence(0.5f).setMinTrackingConfidence(0.5f)
+                    .setNumFaces(1).setMinFaceDetectionConfidence(0.3f)
+                    .setMinFacePresenceConfidence(0.3f).setMinTrackingConfidence(0.2f)
                     .setOutputFaceBlendshapes(true).build()
                 face = FaceLandmarker.createFromOptions(ctx, opt)
             }
@@ -283,8 +323,22 @@ class EyeTracker(
             val fres = fm.detect(mpImg)
             val faces = fres.faceLandmarks()
             if (faces.isEmpty()) {
-                if (++faceLostStreak <= 5) return // 瞇眼會短暫跟丟：凍住，不計不清，不刷提示
-                closedStreak = 0; openStreak = 0
+                // ponytail: ~3s 凍結，大小臉/抬低頭/閉眼跟丟全蓋掉；閉眼中跟丟視為延續（睜眼只凍不計，低頭不誤觸）
+                if (++faceLostStreak <= FACE_LOST_TOL) {
+                    if (closedStreak > 0 || pendingDir != 0 || !armed) {
+                        if (armed) {
+                            closedStreak++
+                            if (closedStreak >= needClosed) {
+                                closedStreak = 0; armed = false
+                                pendingDir = if (lastFist == "拳") 2 else 1
+                            }
+                        }
+                        statusThrottled("閉眼")
+                        lines("入鏡", "閉眼", lastFist)
+                    }
+                    return
+                }
+                // 連丟超限才報出鏡，計數保留（回來直接續，幾乎不判）
                 statusThrottled("臉出鏡")
                 lines("出鏡", "睜眼", "X")
                 return
@@ -300,9 +354,18 @@ class EyeTracker(
                     }
                 }
             } catch (_: Exception) {}
+            // ponytail: blend OR EAR（幾何備援，全閉掉分/瞇眼低分時兜底；landmark 不夠回1=只信 blend）
+            val earThresh = if (squintMode) EAR_SQUINT else EAR_CLOSED
+            val ear = eyeEar(faces[0])
             // ponytail: 抖動帶跟門檻等比（50% 時=0.1 跟舊版一致）；固定 0.1 在 10% 門檻下會永遠不清零不上膛
             val hys = (blinkScore * 0.3f).coerceAtMost(0.1f)
-            if (blink < blinkScore - hys) {
+            val blendClosed = blink >= blinkScore
+            val blendOpen = blink < blinkScore - hys
+            val earClosed = ear <= earThresh
+            val earOpen = ear > earThresh + EAR_HYS
+            val isClosed = blendClosed || earClosed
+            val isOpen = blendOpen && earOpen
+            if (isOpen) {
                 // 睜眼：連 2 幀才算數，單幀抖動不清零；達標掛起的在睜眼這一下才翻
                 val dir = pendingDir
                 val wasClosed = closedStreak > 0 || !armed || dir != 0
@@ -331,7 +394,7 @@ class EyeTracker(
                 lines("入鏡", "閉眼", lastFist)
                 return
             }
-            if (blink < blinkScore) {
+            if (!isClosed) {
                 // 抖動帶：凍住，既不計也不清
                 statusThrottled(if (closedStreak > 0) "閉眼" else "")
                 if (closedStreak > 0) lines("入鏡", "閉眼", lastFist)
