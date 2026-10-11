@@ -37,8 +37,7 @@ class EyeTracker(
         private const val FRAME_GAP_MS = 100L // ~10fps，省電且夠用
         private const val NEED_CLOSED = 6 // demo 預設；實跑用 needClosed（設定頁可調）
         const val FACE_LOST_TOL = 30 // ~3s：大小臉/抬低頭/閉眼跟丟全凍住，幾乎不判出鏡
-        const val EAR_CLOSED = 0.15f // 全閉門檻
-        const val EAR_SQUINT = 0.17f // 瞇眼（3/4）門檻
+        const val EAR_CLOSED = 0.15f // 全閉門檻（瞇眼開關已拿掉：半閉靠 blend 靈敏度）
         const val EAR_HYS = 0.02f
         // ponytail: EAR 雙眼平均，landmark 不夠回 1（當睜眼，不誤觸）
         fun eyeEar(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): Float {
@@ -142,11 +141,10 @@ class EyeTracker(
             check(isFist(fakeHand(setOf(0)))) { "半握應算拳" }
             check(!isFist(fakeHand(setOf(0, 1)))) { "兩指伸不應算拳" }
             check(!isFist(fakeHand(setOf(0, 1, 2, 3)))) { "全張不應算拳" }
-            // EAR：睜>瞇>閉，全閉與瞇眼都要能分辨
+            // EAR：睜大、全閉要能分辨（半閉不進門檻，靠 blend 靈敏度）
             check(eyeEar(fakeFace(0.30f)) > 0.25f) { "睜眼 EAR 應大" }
-            check(eyeEar(fakeFace(0.16f)) < EAR_SQUINT) { "瞇眼應進瞇眼門檻" }
             check(eyeEar(fakeFace(0.08f)) < EAR_CLOSED) { "全閉應進全閉門檻" }
-            check(eyeEar(fakeFace(0.16f)) > EAR_CLOSED) { "瞇眼不應掉進全閉門檻" }
+            check(eyeEar(fakeFace(0.155f)) > EAR_CLOSED) { "半閉不應進全閉門檻" }
             return "EyeTracker demo OK"
         }
 
@@ -210,7 +208,7 @@ class EyeTracker(
     @Volatile var cooldownMs = 1500L
     @Volatile var needClosed = 4 // 閉眼幾幀才翻（~10fps，4≈0.4秒）；設定頁可調 3~8
     @Volatile var blinkScore = 0.4f // eyeBlink 超過算閉；設定頁可調 0.3~0.7（越小越靈）
-    @Volatile var squintMode = false // 瞇眼（3/4）也算閉；設定頁開關
+    @Volatile var earThresh = EAR_CLOSED // EAR 低於算閉；設定頁可調 5~30%（越大越靈）
     @Volatile var running = false
 
     /** model 缺失/權限不足回 false，呼叫方 Toast 提示，不炸。preview 有給才顯示小窗。 */
@@ -354,8 +352,7 @@ class EyeTracker(
                     }
                 }
             } catch (_: Exception) {}
-            // ponytail: blend OR EAR（幾何備援，全閉掉分/瞇眼低分時兜底；landmark 不夠回1=只信 blend）
-            val earThresh = if (squintMode) EAR_SQUINT else EAR_CLOSED
+            // ponytail: blend OR EAR（幾何備援，全閉掉分時兜底；landmark 不夠回1=只信 blend）
             val ear = eyeEar(faces[0])
             // ponytail: 抖動帶跟門檻等比（50% 時=0.1 跟舊版一致）；固定 0.1 在 10% 門檻下會永遠不清零不上膛
             val hys = (blinkScore * 0.3f).coerceAtMost(0.1f)

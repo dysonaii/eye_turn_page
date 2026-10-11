@@ -41,7 +41,7 @@ class PageTurnService : AccessibilityService() {
         const val KEY_IDLE = "idle"
         const val KEY_NEED = "need"
         const val KEY_BLINK = "blink"
-        const val KEY_SQUINT = "squint"
+        const val KEY_EAR = "ear"
         val DEFAULT_APPS = setOf("com.tencent.weread")
 
         // ponytail: static 當跨 Activity/Service 通訊，存 DB / Intent 是多餘的
@@ -59,7 +59,7 @@ class PageTurnService : AccessibilityService() {
         @Volatile var idleMs = 5 * 60 * 1000L // 閒置多久沒翻頁自動停；default 5 分鐘
         @Volatile var needClosed = 4 // 閉眼幾幀才翻；default 4（~0.4秒，比 6 靈）
         @Volatile var blinkScore = 40 // eyeBlink 百分比，超過算閉；越小越靈
-        @Volatile var squintMode = false // 瞇眼（3/4）也算閉；default 關
+        @Volatile var earScore = 15 // EAR 百分比，低於算閉；越大越靈
         @Volatile var currentPkg: String = ""
         @Volatile var instance: PageTurnService? = null
 
@@ -78,7 +78,7 @@ class PageTurnService : AccessibilityService() {
             idleMs = p.getInt(KEY_IDLE, 5).coerceIn(1, 30) * 60 * 1000L
             needClosed = p.getInt(KEY_NEED, 4).coerceIn(3, 8)
             blinkScore = p.getInt(KEY_BLINK, 40).coerceIn(10, 70)
-            squintMode = p.getBoolean(KEY_SQUINT, false)
+            earScore = p.getInt(KEY_EAR, 15).coerceIn(5, 30)
         }
 
         fun saveRunning(ctx: Context) {
@@ -105,6 +105,9 @@ class PageTurnService : AccessibilityService() {
                 // ponytail: 相機跑著（翻頁中）不藏球——不然停止鍵沒了；真在外面事件會先停相機，下輪再藏
                 else if (ball != null && tracker?.running != true && !surelyInside()) hideOverlay()
                 refreshBall()
+                // ponytail: 回調不可靠時2s內補跳槽（直→橫→直回來否則停在橫屏座標=直屏中間偏上）
+                val landNow = isLandscape()
+                if (previewBox != null && previewLand != landNow) snapPreviewToOrientation(landNow)
                 // 閒置超時：一段時間沒翻頁就關相機停球（省電，人走開不用管）
                 if (active() && SystemClock.uptimeMillis() - lastFlipAt > idleMs) {
                     stop()
@@ -206,6 +209,7 @@ class PageTurnService : AccessibilityService() {
         }
     }
     private var previewPending = false
+    private var previewLand = false // 預覽窗當前按哪向擺的；看門狗比對即時方向，不等就跳槽
 
     // ponytail: 蓋在 TextureView 上的透明層，只顯示左上三行狀態字；不吃觸控（小窗照樣拖）
     private inner class HandOverlay(ctx: Context) : View(ctx) {
@@ -273,7 +277,14 @@ class PageTurnService : AccessibilityService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // ponytail: 點位按當下 metrics 算，直橫皆通；這裡只夾球回可視範圍
+        // ponytail: 回調參數的方向最準，直接跳槽
+        snapPreviewToOrientation(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
+    }
+
+    // ponytail: 轉屏跳槽（尺寸夾回＋讀該向記住位＋球夾回）；看門狗也調它——部分 ROM 不送回調，
+    // 不補的話窗戶留在橫屏座標，直屏看就是中間偏上
+    private fun snapPreviewToOrientation(land: Boolean) {
+        // ponytail: 點位按當下 metrics 算，直橫皆通
         val (sw, sh) = screenSize()
         ballParams?.let { bp ->
             bp.x = bp.x.coerceIn(0, (sw - dp(56)).coerceAtLeast(0))
@@ -284,13 +295,12 @@ class PageTurnService : AccessibilityService() {
             val maxW = (sw / 2).coerceAtLeast(dp(80))
             pp.width = pp.width.coerceIn(dp(80), maxW)
             pp.height = pp.width * 3 / 4
-            // ponytail: 用 newConfig 方向讀槽——回調時 resources 還是舊向，直屏會誤讀橫屏槽
-            val landNow = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
-            val (sx, sy) = if (landNow) pvXL to pvYL else pvXP to pvYP
+            val (sx, sy) = if (land) pvXL to pvYL else pvXP to pvYP
             pp.x = (if (sx >= 0) sx else pp.x).coerceIn(0, (sw - pp.width).coerceAtLeast(0))
             pp.y = (if (sy >= 0) sy else pp.y).coerceIn(0, (sh - pp.height).coerceAtLeast(0))
             if (previewBox != null) try { wm?.updateViewLayout(previewBox, pp) } catch (_: Exception) {}
         }
+        previewLand = land
         refitPreview()
     }
 
@@ -328,7 +338,7 @@ class PageTurnService : AccessibilityService() {
         tracker?.cooldownMs = cooldownMs
         tracker?.needClosed = needClosed
         tracker?.blinkScore = blinkScore / 100f
-        tracker?.squintMode = squintMode
+        tracker?.earThresh = earScore / 100f
         if (!overlayOn) hideOverlay()
         else showOverlay()
         refitPreview() // 大小/透明度即時生效
@@ -415,7 +425,7 @@ class PageTurnService : AccessibilityService() {
         t.cooldownMs = cooldownMs
         t.needClosed = needClosed
         t.blinkScore = blinkScore / 100f
-        t.squintMode = squintMode
+        t.earThresh = earScore / 100f
         if (!t.start(ps)) {
             // 相機開不了（權限/模型）：停本次免得空轉，回設定頁看提示
             Toast.makeText(this, "相機/模型沒就緒，去設定頁檢查", Toast.LENGTH_SHORT).show()
@@ -462,8 +472,20 @@ class PageTurnService : AccessibilityService() {
     // ---- 懸浮球 ----
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    // ponytail: 位置直橫分開記，跟著當下方向讀寫
-    private fun isLandscape() = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    // ponytail: Display 轉角即時判橫直——service 的 resources.configuration 在轉屏時是舊值，
+    // 橫屏拖曳存檔會誤寫直屏槽（直→橫→直回來掉到中間）；跟 EyeTracker.displayDeg 同源
+    private fun isLandscape(): Boolean {
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            val rot = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                try { display?.rotation } catch (_: Exception) { null }
+                    ?: @Suppress("DEPRECATION") wm.defaultDisplay.rotation
+            } else @Suppress("DEPRECATION") wm.defaultDisplay.rotation
+            if (rot == android.view.Surface.ROTATION_90 || rot == android.view.Surface.ROTATION_270) return true
+            if (rot == android.view.Surface.ROTATION_0 || rot == android.view.Surface.ROTATION_180) return false
+        } catch (_: Exception) {}
+        return resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    }
     private fun savedPos(): Pair<Int, Int> = if (isLandscape()) pvXL to pvYL else pvXP to pvYP
 
     // ponytail: dispatchGesture 吃螢幕座標；displayMetrics 在橫屏/手勢列下會偏小，API 30+ 用真實螢幕尺寸
@@ -660,6 +682,11 @@ class PageTurnService : AccessibilityService() {
                         previewWdp = (pp.width / resources.displayMetrics.density).toInt().coerceIn(80, 400)
                         ed.putInt(KEY_PVW, previewWdp)
                     }
+                    // ponytail: 抬手先夾回屏內再存——頂部推出屏外會存出負數，下次被當沒擺過掉回預設（只有 y 變、x 不變）
+                    val (csw, csh) = screenSize()
+                    pp.x = pp.x.coerceIn(0, (csw - pp.width).coerceAtLeast(0))
+                    pp.y = pp.y.coerceIn(0, (csh - pp.height).coerceAtLeast(0))
+                    try { w.updateViewLayout(box, pp) } catch (_: Exception) {}
                     // ponytail: 抬手即存位置（直橫分槽），服務被殺也不丟
                     if (isLandscape()) { pvXL = pp.x; pvYL = pp.y; ed.putInt(KEY_PVX_L, pp.x).putInt(KEY_PVY_L, pp.y) }
                     else { pvXP = pp.x; pvYP = pp.y; ed.putInt(KEY_PVX_P, pp.x).putInt(KEY_PVY_P, pp.y) }
@@ -673,6 +700,7 @@ class PageTurnService : AccessibilityService() {
         previewParams = pp
         try {
             w.addView(box, pp)
+            previewLand = isLandscape()
             tv.post { EyeTracker.fitPreview(tv, EyeTracker.frontSensorDeg(this), EyeTracker.displayDeg(this)) }
             handler.removeCallbacks(coolTick)
             handler.post(coolTick)

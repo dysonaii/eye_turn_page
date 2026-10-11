@@ -29,7 +29,8 @@ class MainActivity : Activity() {
     private lateinit var needSeek: SeekBar
     private lateinit var blinkLabel: TextView
     private lateinit var blinkSeek: SeekBar
-    private lateinit var squintBox: CheckBox
+    private lateinit var earLabel: TextView
+    private lateinit var earSeek: SeekBar
     private lateinit var idleLabel: TextView
     private lateinit var idleSeek: SeekBar
     private lateinit var overlayBox: CheckBox
@@ -108,10 +109,18 @@ class MainActivity : Activity() {
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        squintBox = CheckBox(this).apply {
-            text = "瞇眼（合上3/4）也算閉眼"
-            isChecked = p.getBoolean(PageTurnService.KEY_SQUINT, false)
-            setOnCheckedChangeListener { _, _ -> save() }
+        earLabel = TextView(this)
+        earSeek = SeekBar(this).apply {
+            max = 25 // 5~30%；default 15（越大越靈）
+            progress = (p.getInt(PageTurnService.KEY_EAR, 15) - 5).coerceIn(0, 25)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
+                    earLabel.text = "EAR 門檻：${v + 5}%"
+                    save()
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
         }
         overlayBox = CheckBox(this).apply {
             text = "懸浮球：點一下開始/暫停，長按回設定"
@@ -210,7 +219,8 @@ class MainActivity : Activity() {
             addView(needSeek)
             addView(blinkLabel)
             addView(blinkSeek)
-            addView(squintBox)
+            addView(earLabel)
+            addView(earSeek)
             addView(idleLabel)
             addView(idleSeek)
             addView(overlayBox)
@@ -233,6 +243,7 @@ class MainActivity : Activity() {
         coolLabel.text = "翻頁冷卻：${coolSeek.progress + 1} 秒"
         needLabel.text = "閉眼時間：${needSeek.progress + 3} 幀"
         blinkLabel.text = "閉眼靈敏度：${blinkSeek.progress + 10}%"
+        earLabel.text = "EAR 門檻：${earSeek.progress + 5}%"
         idleLabel.text = "閒置 ${idleSeek.progress + 1} 分鐘自動停"
         alphaLabel.text = "懸浮球透明度：${alphaSeek.progress + 10}%"
         pvSizeLabel.text = "預覽窗大小：${80 + pvSizeSeek.progress * 10}dp"
@@ -267,7 +278,7 @@ class MainActivity : Activity() {
             .putInt(PageTurnService.KEY_COOLDOWN, (coolSeek.progress + 1) * 1000)
             .putInt(PageTurnService.KEY_NEED, needSeek.progress + 3)
             .putInt(PageTurnService.KEY_BLINK, blinkSeek.progress + 10)
-            .putBoolean(PageTurnService.KEY_SQUINT, squintBox.isChecked)
+            .putInt(PageTurnService.KEY_EAR, earSeek.progress + 5)
             .putInt(PageTurnService.KEY_IDLE, idleSeek.progress + 1)
             .putBoolean(PageTurnService.KEY_OVERLAY, overlayBox.isChecked)
             .putInt(PageTurnService.KEY_ALPHA, alphaSeek.progress + 10)
@@ -324,7 +335,7 @@ class MainActivity : Activity() {
         nt.cooldownMs = 1000L
         nt.needClosed = PageTurnService.needClosed
         nt.blinkScore = PageTurnService.blinkScore / 100f
-        nt.squintMode = PageTurnService.squintMode
+        nt.earThresh = PageTurnService.earScore / 100f
         if (!nt.start(ps)) { ps?.release(); stopTest(); return } // 失敗原因已由 onStatus 顯示
         previewSurface = ps
         testTracker = nt
