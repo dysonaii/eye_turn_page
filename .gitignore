@@ -8,6 +8,8 @@ local.properties
 # signing
 *.jks
 *.keystore
+keystore.properties
+release/
 # models (8MB+ 下載放 assets，不進 git)
 *.task
 # OS
